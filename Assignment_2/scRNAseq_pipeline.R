@@ -1,0 +1,509 @@
+#Final scRNA-seq clustering pipeline
+options(warn = -1)
+
+## Install libraries
+#Install the following libraries: caret, ggplot2, tidyverse, umap, Rtsne , factoextra, mclust, matrixStats, plotly
+
+install.packages(c("caret", "ggplot2", "tidyverse", "tsne", "umap", "Rtsne" , "factoextra", "mclust", "matrixStats", "plotly"))
+
+## Load libraries
+
+#### Loading package
+suppressMessages({
+  library(caret)
+  library(ggplot2)
+  library(tidyverse)
+  library(umap)
+  library(Rtsne)
+  library(factoextra)
+  library(mclust)
+  library(matrixStats)
+  library(plotly)
+  library("RColorBrewer")
+})
+
+## Functions
+comb = function(n, x) {
+  factorial(n) / factorial(n-x) / factorial(x)
+}
+
+
+### Pre-processing
+
+#### Decorrelation
+# We remove the highly correlated variables (correlation \>0.7). Input:
+# -   dataframe: our dataframe
+# -   cutoff_value: we will remove variable with correlation greater than this value (default = 0.7)
+decorrelation <- function(dataframe, cutoff_value = .7){
+  Corrmatrix <- cor(dataframe, method = "pearson")
+  print("Decorrelation...")
+  highlyCorrelated <- findCorrelation(Corrmatrix, cutoff = cutoff_value, verbose = FALSE, names = TRUE)
+  decorrelated_df <- dataframe[, ! names(dataframe) %in% highlyCorrelated]
+  return(decorrelated_df)
+}
+
+#### Standardization
+# We choose to center and standardize the dataset. A boxplot is produced of the standardized. Input:
+# -   dataframe: our dataframe
+# -   i: number of dataset
+# 
+# Return standardized dataset
+preprocess <- function(dataframe, i){
+  print("Preprocessing...")
+  standarized <- preProcess(dataframe, method=c("center", "scale"))
+  standarized_df <- predict(standarized, dataframe)
+  boxplot(standarized_df, main=paste("Barplot of Centered and Scaled Dataset", i), 
+          xlab="Genes", cex.lab=2, cex.main=2, cex.sub=2)
+  return(standarized_df)
+}
+
+### Dimensionality reduction
+
+#### PCA
+# When the function PCA is called the following are calculated/produced:
+# -   Perform PCA
+# -   Calculate the number of necessary Principal Components in order to reach 80% of explained variance
+# -   Calculate the Optimal Number of Principal Components (number of PCs not explained by chance) and produce plot
+# -   Perform clustering using GMMs and the BIC criterion in order to choose the number of components used for clustering. Produce the following plots:
+#   -   PC1 vs PC2
+#   -   BIC Criterion
+#   -   PCA Clustering
+#   -   Trajectory plots
+# 
+# Input:
+# -   dataframe: our dataframe
+# 
+# Return:
+# -   dataframe_pca: output of the PCA function
+# -   comp: number of principal components in order to reach 80% variance
+# -   optPC: number of Optimal Principal Components
+
+pca_fun <- function(dataframe){
+  print("Performing PCA...")
+  par(mfrow=c(1,1), oma=c(0,1,0,0))
+  dataframe_pca <- prcomp(dataframe)
+  
+  #Find the explained variance per dataframe_pca
+  expl_var <- dataframe_pca$sdev^2/sum(dataframe_pca$sdev^2)
+  
+  #How many principal components do we need to reach the explained variance threshold (=0.8)
+  comp <- 0
+  threshold <- 0.8
+  sum <-0
+  for(k in expl_var){
+    comp <- comp + 1
+    sum <- sum + k
+    if (sum >= threshold){
+      break
+    }
+  }
+  print(paste("Number of components to reach 80% of explained variance:",comp))
+  
+  #Optimal number of principal components
+  N_perm <- 10
+  expl_var_perm <- matrix(NA, ncol = length(dataframe_pca$sdev), nrow = N_perm)
+  for(k in 1:N_perm)
+  {
+    expr_perm <- apply(dataframe,2,sample)
+    PC_perm <- prcomp(t(expr_perm), center=TRUE, scale=FALSE)
+    expl_var_perm[k,] <- PC_perm$sdev^2/sum(PC_perm$sdev^2)
+  }
+  
+  #Optimal number of principal components plot
+  plot(expl_var[1:50]~seq(1:50), ylab="EXPLAINED VARIANCE",
+       col="darkgreen", type='o', xlab="PRINCIPAL COMPONENTS", cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  lines(colMeans(expl_var_perm)[1:50]~seq(1:50),col="red")
+  legend("topright", c("Explained by PCs", "Explained by chance"),
+         fill=c("darkgreen","red"), inset=0.02, cex=2)
+  
+  pval <- apply(t(expl_var_perm) >= expl_var,1,sum) / N_perm
+  print("Choosing optimal number of principal components based on p-value > 0.05")
+  optPC<-head(which(pval>=0.05),1)-1
+  mtext(paste0("OPTIMAL NUMBER OF PRINCIPAL COMPONENTS = ",optPC), cex = 3)
+  print(paste("Optimal number of principal components:",optPC))
+  
+  print("End of PCA.")
+  
+  df.pca <- data.frame(x = dataframe_pca$x[,1],
+                       y = dataframe_pca$x[,2])
+  
+  BIC1 <- mclustBIC(df.pca, verbose = FALSE)
+  
+  cluster.data <- Mclust(df.pca, x = BIC1, verbose = FALSE)
+  
+  ## preview plots
+  par(mfrow=c(1,3), oma=c(0,1,3,0))
+  
+  plot(df.pca, col="blue", xlab="PC1", ylab="PC2", 
+       bg='tomato2', pch=21,  lwd=0.2, cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  mtext("PC1 vs PC2", font=2, cex = 2)
+  
+  plot(BIC1, cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  mtext("BIC criterion", font=2, cex=2)
+  
+  plot(cluster.data, bg=cluster.data$classification, pch=21,
+       xlab='PC1', ylab='PC2', what="classification", cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  mtext("PCA Clustering", font=2, cex= 2)
+  title("PCA", cex.main = 3, outer=TRUE) #################
+  
+  post <- as.data.frame(cluster.data[["z"]])
+  post[post < 0.01] <- 0
+  par(mfrow=c(1,1))
+  names = c()
+  for (i in 1:ncol(post)){
+    names = c(names, paste0("Cluster ",i))
+  }
+  colnames(post) <- names
+  pal <- brewer.pal(ncol(post), "Dark2")
+  
+  par(mfrow=c(1,1))
+  post1 <- post[do.call(order, post),]
+  matplot(y=post1, type =  "n",  xlab = "Cell index", ylab = "Posterior",
+          main = paste("PCA Trajectory plot"), lty = "solid", cex.lab=2, cex.axis=2, cex.main=3, cex.sub=2)
+  matlines(post1,   col = pal, lty = "solid")
+  legend("right", legend=names, col = pal,lty=1:2, cex=2) 
+  
+  return(c(dataframe_pca, comp, optPC))
+}
+
+
+#### UMAP
+# Perform UMAP dimensionality reduction using a number of principal components (produced by PCA). Input:
+# -   dataframe: our dataframe
+# -   components: number of principal components to use
+# -   n: number of neighbors
+# -   epochs: number of epochs to run UMAP (default=2000)
+# -   dist: minimum distance parameter (default=0.1)
+# 
+# Return the output of the UMAP function
+umap_fun <- function(datafarme, components, n, epochs=2000, dist=0.1){
+  #print("Performing UMAP...")
+  df.umap <- umap(datafarme$x[,1:components], n_epochs=epochs, n_neighbors=n, min_dist=dist)
+  
+  #print("End of UMAP.")
+  return(df.umap)
+}
+
+
+#### tSNE
+# Perform UMAP dimensionality reduction using a number of principal components (produced by PCA). Input:
+# -   dataframe: our dataframe
+# -   components: number of principal components to use
+# -   perp: Perplexity
+# -   iter: Maximum number of iterations
+# 
+# Return the output of the tSNE function
+tsne_fun <- function(datafarme, components, perp, iter){
+  tsne_results <- Rtsne(datafarme,verbose=FALSE,
+        initial_dims=components,
+        perplexity=perp,
+        max_iter=iter)
+  
+  return(tsne_results)
+}
+
+
+
+
+### Clustering plots for UMAP
+# Produce clustering and trajectory plots. Input:
+# -   umap_output: the output of the umap function
+# -   BIC: results of BIC analysis
+# -   cluster.data: Mclust output
+# -   n: number of neighbors
+# -   dist: minimum distance parameter (default=0.1)
+# 
+# Produces:
+# -   Clustering plots:
+# -   UMAP1 vs UMAP2
+# -   BIC Criterion
+# -   UMAP Clustering
+# -   Trajectory plots
+
+clustering_umap <- function(umap_output, BIC, cluster.data, n, dist){
+  
+  #Create clustering plots
+  print("Creating clustering plots")
+  par(mfrow=c(1,3), oma=c(0,1,4.5,0))
+  
+  plot(umap_output$layout,xlab="UMAP1",ylab="UMAP2",
+       col="blue", bg='tomato2', pch=21, lwd=0.2, cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  mtext("UMAP1 vs UMAP2", font=2, cex=2)
+  
+  plot(BIC, cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  mtext("BIC criterion", font=2, cex=2)
+  
+  plot(cluster.data, bg=cluster.data$classification,
+       pch=21,xlab='UMAP1', ylab='UMAP2', what = "classification", cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  
+  mtext(paste("UMAP Clustering"), font=2, cex=2)
+  
+  
+  title(paste("Clustering: UMAP\nn =", n, "| dist =", dist ), cex.main = 3, outer=TRUE)
+  
+  #Create trajectory plots
+  #print("Creating trajectory plots")
+  post <- as.data.frame(cluster.data[["z"]])
+  post <- as.data.frame(cluster.data[["z"]])
+  post[post < 0.01] <- 0
+  par(mfrow=c(1,1))
+  names = c()
+  for (i in 1:ncol(post)){
+    names = c(names, paste0("Cluster ",i))
+  }
+  colnames(post) <- names
+  pal <- brewer.pal(ncol(post), "Dark2")
+  
+  par(mfrow=c(1,1))
+  post1 <- post[do.call(order, post),]
+  matplot(y=post1, type =  "n",  xlab = "Cell index", ylab = "Posterior",
+          main = paste("UMAP Trajectory plot"), lty = "solid", cex.lab=2, cex.axis=2, cex.main=3, cex.sub=2)
+  matlines(post1,   col = pal, lty = "solid")
+  legend("right", legend=names, col = pal,lty=1:2, cex=2) 
+}
+
+
+
+### Clustering plots for tSNE
+# Produce clustering and trajectory plots. Input:
+# -   tsne_output: the output of the tSNE function
+# -   BIC: results of BIC analysis
+# -   cluster.data: Mclust output
+# -   perp: perplexity
+# -   iter: maximum number of iterations
+# 
+# Produces:
+# -   Clustering plots:
+# -   tSNE1 vs tSNE2
+# -   BIC Criterion
+# -   tSNE Clustering
+# -   Trajectory plots
+
+clustering_tsne <- function(tsne_output, BIC, cluster.data, perp, iter){
+  
+  #Create clustering plots
+  print("Creating clustering plots")
+  par(mfrow=c(1,3), oma=c(0,1,4.5,0))
+  
+  plot(tsne_output$Y,xlab="tSNE1",ylab="tSNE2",
+       col="blue", bg='tomato2', pch=21, lwd=0.2, cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  mtext("tSNE1 vs tSNE2", font=2, cex=2)
+  
+  plot(BIC, cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  mtext("BIC criterion", font=2, cex=2)
+  
+  plot(cluster.data, bg=cluster.data$classification,
+       pch=21,xlab='tSNE1', ylab='tSNE2', what = "classification", cex.lab=2, cex.axis=2, cex.main=2, cex.sub=2)
+  
+  mtext("tSNE Clustering", font=2, cex=2)
+  
+  
+  title(paste("clustering: tSNE\nperp =", perp, "| iter =", iter ), cex.main = 3, outer=TRUE)
+  
+  #Create trajectory plots
+  #print("Creating trajectory plots")
+  post <- as.data.frame(cluster.data[["z"]])
+  post[post < 0.01] <- 0
+  par(mfrow=c(1,1))
+  names = c()
+  for (i in 1:ncol(post)){
+    names = c(names, paste0("Cluster ",i))
+  }
+  colnames(post) <- names
+  pal <- brewer.pal(ncol(post), "Dark2")
+  
+  par(mfrow=c(1,1))
+  post1 <- post[do.call(order, post),]
+  matplot(y=post1, type =  "n",  xlab = "Cell index", ylab = "Posterior",
+          main = paste("tSNE Trajectory plot"), lty = "solid", cex.lab=2, cex.axis=2, cex.main=3, cex.sub=2)
+  matlines(post1,   col = pal, lty = "solid")
+  legend("right", legend=names, col = pal,lty=1:2, cex=2)
+}
+
+
+
+
+
+### Main function
+# Perform the analysis:
+# 
+# 1.  Remove highly correlated variables
+# 2.  Centering and scaling of the dataset,
+# 3.  PCA will be used in order to reduce the number of dimensions of the dataset,
+# 4.  Perform dimensionality reduction using UMAP and perform clustering using GMMs and the BIC criterion. Repeat for different combinations of UMAP parameters (number of neighbors and minimum distance),
+# 5.  Perform dimensionality reduction using the optimal UMAP parameters, determined in step 4, and perform clustering using GMMs and the BIC criterion.
+# 6.  Produce clustering and trajectory plots
+# 7.  Repeat for tSNE
+# 
+# Input:
+# -   dataframe: our initial dataframe
+# -   i: number of the dataframe
+# 
+# Produce:
+# -   Optimum clustering results and plots
+
+#Main function
+main <- function(dataframe, i){
+  
+  data <- preprocess(dataframe, i) #Perform standarization
+  data <- decorrelation(data) #Perform decorrelation
+  
+  #PCA
+  pca_output <- pca_fun(data) 
+  df_pca <- pca_output[1:(length(pca_output)-2)]
+  num_comp <- pca_output[length(pca_output)-1][[1]]
+  optPC <- pca_output[length(pca_output)][[1]]
+  
+  #How many PCs to use for UMAP
+  components = 50
+  print(paste("Number of initial UMAP components:", components))
+  print("Staring UMAP analysis")
+  
+  #Neighbor values to test
+  min_ns = round(length(data)*0.025)
+  max_ns = round(length(data)*0.25)
+  step = min_ns
+  ns =  seq(min_ns, max_ns, by=step)
+  #Minimum distance values to test
+  dists = c(0.05, 0.1, 0.2, 0.3, 0.4)
+  
+  #Initialize BICs table in which we will store 
+  #the best BIC results, number of neighbors and minimum distance
+  #parameters which correspond to the optimum BIC value
+  BICs_umap <- matrix(nrow=length(ns)*length(dists), ncol=3)
+  print(length(ns)*length(dists))
+  
+  #Perform UMAP, clustering and store the BIC values and their corresponding parameters for every combination
+  row = 0
+  for (n in ns){
+    for (dist in dists){
+      row = row +1
+      n = round(n)
+      print(paste("Parameter combination: n =", n,"| dist =", dist))
+      umap_output <- umap_fun(df_pca, components, n, dist=dist)
+      
+      dataframe <- data.frame(x = umap_output$layout[,1],
+                              y = umap_output$layout[,2])
+      BIC <- mclustBIC(dataframe, verbose = FALSE)
+      cluster.data <- Mclust(dataframe, x = BIC)
+      
+      clustering_umap(umap_output, BIC, cluster.data, n, dist)
+      
+      BICs_umap[row, 1] = max(BIC, na.rm = T)
+      BICs_umap[row, 2] = n
+      BICs_umap[row, 3] = dist
+      
+    }
+  }
+  print("UMAP analsyis finished")
+  print("Creating optimum BIC UMAP clustering")
+  
+  #Extract the optimal BIC value and the corresponding parameters
+  row = which.max(BICs_umap[,1])
+  n = BICs_umap[row,2]
+  dist = BICs_umap[row,3]
+  
+  #Perform UMAP for the optimal BIC values
+  umap_output_opt <- umap_fun(df_pca, components, n, dist=dist)
+  
+  dataframe_umap <- data.frame(x = umap_output_opt$layout[,1],
+                               y = umap_output_opt$layout[,2])
+  BIC_umap <- mclustBIC(dataframe_umap)
+  cluster.data_umap <- Mclust(dataframe_umap, x = BIC_umap, verbose = FALSE)
+  
+  clustering_umap(umap_output_opt, BIC_umap, cluster.data_umap, n, dist)
+  
+  
+  print("Staring tSNE analysis")
+  
+  if (optPC > 10){
+    components = optPC
+  } else if (num_comp < 50){
+    components = num_comp
+  } else {
+    components = 30
+  }    
+  print(paste("Number of initial tSNE components:", components))
+  #Neighbor values to test
+  min_perp = 5
+  max_perp = 50
+  step = round((max_perp - min_perp)/min_perp)
+  perps =  seq(min_perp, max_perp, by=step)
+  #Minimum distance values to test
+  iters = 5000
+  
+  #Initialize BICs table in which we will store 
+  #the best BIC results, number of neighbors and minimum distance
+  #parameters which correspond to the optimum BIC value
+  BICs_tsne <- matrix(nrow=(length(perps)*length(iters)), ncol=3)
+  row = 0
+  for (perp in perps){
+    for (iter in iters){
+      row = row +1
+      perp = round(perp)
+      print(paste("Parameter combination: perplexity =", perp,"| iterations =", iter))
+      tsne_output <- tsne_fun(data, components, perp, iter)
+      
+      dataframe <- data.frame(x = tsne_output$Y[,1],
+                              y = tsne_output$Y[,2])
+      BIC <- mclustBIC(dataframe, verbose = F)
+      cluster.data <- Mclust(dataframe, x = BIC)
+      
+      clustering_tsne(tsne_output, BIC, cluster.data, perp, iter)
+      
+      BICs_tsne[row, 1] = max(BIC, na.rm = T)
+      BICs_tsne[row, 2] = perp
+      BICs_tsne[row, 3] = iter
+      
+    }
+  }
+  
+  print("tSNE analsyis finished")
+  print("Creating optimum BIC tSNE clustering")
+  
+  #Extract the optimal BIC value and the corresponding parameters
+  row = which.max(BICs_tsne[,1])
+  perp = BICs_tsne[row,2]
+  iter = BICs_tsne[row,3]
+  
+  #Perform tSNE for the optimal BIC values
+  tsne_output_opt <- tsne_fun(data, components, perp, iter)
+  
+  dataframe_tsne <- data.frame(x = tsne_output_opt$Y[,1],
+                               y = tsne_output_opt$Y[,2])
+  BIC_tsne <- mclustBIC(dataframe_tsne)
+  cluster.data_tsne <- Mclust(dataframe_tsne, x = BIC_tsne, verbose = FALSE)
+  
+  clustering_tsne(tsne_output_opt, BIC_tsne, cluster.data_tsne, perp, iter)
+  
+  
+}
+
+
+## Perform analysis
+# 
+# CHANGE THE FOLLOWING PATH TO YOUR WORKING DIRECTORY
+#   
+# Produce a PDF file for each dataset which includes every plot created by the pipeline. **The optimal clustering results are the 2 final plots (clustering and trajectory).
+
+#Path of the data set files
+#"path/to/dataset/directory"
+datatsets_path = "C:/Users/Marios/Documents/MASTER/2nd Semester/ML in Computational Biology/Assignments/2/Assignment2_Datasets" #Change this
+#Change the working directory
+setwd(dir = datatsets_path)
+
+for (i in 1:5){
+  filename = paste0("dataset", i, ".csv")
+  plots = paste0("dataset", i, "_results.pdf")
+  #Load data set
+  df <- read.csv(filename)
+  #Turn first column into row index
+  df <- data.frame(df[,-1], row.names = df[,1])
+  
+  pdf(plots, width=40, height=10)
+  main(df, i)
+  dev.off()
+  
+}
+print("End of analysis.")
+print("Goodbye.")
